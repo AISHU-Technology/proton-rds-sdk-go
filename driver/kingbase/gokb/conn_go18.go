@@ -100,11 +100,6 @@ func callValuerValue(vr driver.Valuer) (v driver.Value, err error) {
 
 // 实现"CheckNamedValue"接口中的"ConvertValue"函数
 func (c converter) ConvertValue(v interface{}) (driver.Value, error) {
-	//判断是否为支持的in类型参数
-	if IsValue(v) {
-		return v, nil
-	}
-
 	//对gokb.Array等类型的支持
 	switch vr := v.(type) {
 	case driver.Valuer:
@@ -116,6 +111,11 @@ func (c converter) ConvertValue(v interface{}) (driver.Value, error) {
 			return nil, fmt.Errorf("non-Value type %T returned from Value", sv)
 		}
 		return sv, nil
+	}
+
+	//判断是否为支持的in类型参数
+	if IsValue(v) {
+		return v, nil
 	}
 
 	//判断是否为out类型参数
@@ -209,9 +209,6 @@ func (cn *conn) QueryContext(ctx context.Context, query string, args []driver.Na
 
 func (st *stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
 	finish := st.cn.watchCancel(ctx)
-	//if finish := st.cn.watchCancel(ctx); finish != nil {
-	//	defer finish()
-	//}
 	var newArgs []driver.Value
 	var err error
 
@@ -230,14 +227,15 @@ func (st *stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (dri
 		}
 	}
 
-	r, err := st.Query(newArgs)
+	r, err := st.query(newArgs)
 	if err != nil {
 		if finish != nil {
 			finish()
 		}
 		return nil, err
 	}
-	return r, err
+	r.finish = finish
+	return r, nil
 }
 
 // 实现"ExecerContext"接口

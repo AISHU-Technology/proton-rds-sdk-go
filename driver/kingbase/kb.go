@@ -8,25 +8,33 @@ import (
 )
 
 func Open(dsn string) (driver.Conn, error) {
-	cfg, err := common.ParseMySQLDSN(dsn)
+	cfg, err := common.ParseDSN(dsn)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := gokb.Open(FormatDSN(cfg))
+	newDSN, err := FormatDSN(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return KBConn{conn: conn}, err
+	conn, err := gokb.Open(newDSN)
+	if err != nil {
+		return nil, err
+	}
+	return KBConn{Conn: conn}, err
 }
 
 func OpenConnector(dsn string) (driver.Connector, error) {
-	cfg, err := common.ParseMySQLDSN(dsn)
+	cfg, err := common.ParseDSN(dsn)
 	if err != nil {
 		return nil, err
 	}
-	cnct, err := gokb.NewConnector(FormatDSN(cfg))
+	newDSN, err := FormatDSN(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &KBCnct{cnct: cnct}, err
+	cnct, err := gokb.NewConnector(newDSN)
+	if err != nil {
+		return nil, err
+	}
+	return &KBConnector{Connector: cnct}, err
 }

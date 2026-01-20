@@ -1,4 +1,4 @@
-package mysql
+package kingbase
 
 import (
 	"fmt"
@@ -18,12 +18,12 @@ type TestDBInfo struct {
 }
 
 func getTestDBInfo() TestDBInfo {
-	user := os.Getenv("MYSQL_TEST_USER")
-	password := os.Getenv("MYSQL_TEST_PASSWORD")
-	host := os.Getenv("MYSQL_TEST_HOST")
-	port, err := strconv.Atoi(os.Getenv("MYSQL_TEST_PORT"))
+	user := os.Getenv("KDB_TEST_USER")
+	password := os.Getenv("KDB_TEST_PASSWORD")
+	host := os.Getenv("KDB_TEST_HOST")
+	port, err := strconv.Atoi(os.Getenv("KDB_TEST_PORT"))
 	if err != nil {
-		log.Fatalf("MYSQL_TEST_PORT is not a number: %v", err)
+		log.Fatalf("KDB_TEST_PORT is not a number: %v", err)
 	}
 	return TestDBInfo{
 		Host:     host,
@@ -34,10 +34,10 @@ func getTestDBInfo() TestDBInfo {
 }
 
 func TestOpen(t *testing.T) {
-	Convey("Test mysql.Open\n", t, func() {
+	Convey("Test kingbase.Open\n", t, func() {
 		info := getTestDBInfo()
 		Convey("Open fail\n", func() {
-			error_port := 30036
+			error_port := 12345
 			dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/", info.Username, info.Password, info.Host, error_port)
 			_, err := Open(dsn)
 			So(err, ShouldNotBeNil)
@@ -51,10 +51,10 @@ func TestOpen(t *testing.T) {
 }
 
 func TestOpenConnector(t *testing.T) {
-	Convey("Test mysql.OpenConnector\n", t, func() {
+	Convey("Test kingbase.OpenConnector\n", t, func() {
 		info := getTestDBInfo()
 		Convey("Open fail\n", func() {
-			error_port := 30036
+			error_port := 12345
 			dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)test", info.Username, info.Password, info.Host, error_port)
 			_, err := OpenConnector(dsn)
 			So(err, ShouldNotBeNil)

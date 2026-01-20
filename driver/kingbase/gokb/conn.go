@@ -395,6 +395,12 @@ func (cn *conn) handleDriverSettings(o values) (err error) {
 		fErr = nil
 		return
 	}
+	numSetting := func(key string, val *int) (fErr error) {
+		if value, ok := o[key]; ok {
+			*val, fErr = strconv.Atoi(value)
+		}
+		return
+	}
 
 	err = boolSetting("disable_prepared_binary_result", &cn.disablePreparedBinaryResult)
 	if nil != err {
@@ -404,8 +410,33 @@ func (cn *conn) handleDriverSettings(o values) (err error) {
 	if nil != err {
 		return err
 	}
-	err = boolSetting("get_last_insert_id", &cn.getLastInserttId.enable)
-	cn.getLastInserttId.isInsert = false
+
+	//获取自增列id
+	err = boolSetting("get_last_insert_id", &cn.getLastInsertId.enable)
+	cn.getLastInsertId.isInsert = false
+	if nil != err {
+		return err
+	}
+
+	//多主机地址的连接重试次数和每次连接的延迟
+	err = numSetting("retry", &cn.retry)
+	if nil != err {
+		return err
+	}
+	err = numSetting("delay", &cn.delay)
+	if nil != err {
+		return err
+	}
+	//多主机地址是否需要找主
+	if value, ok := o["target_session_attrs"]; ok {
+		if value == "read-write" {
+			cn.requirePrimary = true
+		} else if value == "any" {
+			cn.requirePrimary = false
+		} else {
+			return fmt.Errorf("unrecognized value %q for target_session_attrs", value)
+		}
+	}
 	return
 }
 
@@ -519,6 +550,11 @@ func (c *Connector) open(ctx context.Context) (cn *conn, err error) {
 	defer errRecoverNoErrBadConn(&err)
 
 	o := c.opts
+	numHosts := len(c.hosts)
+	numPorts := len(c.ports)
+	numMatch := false
+	i := 0
+	j := 0
 
 	cn = &conn{
 		opts:   o,
@@ -531,53 +567,121 @@ func (c *Connector) open(ctx context.Context) (cn *conn, err error) {
 	}
 	cn.handleKbpass(o)
 
-	cn.c, err = dial(ctx, c.dialer, o)
-	if nil != err {
-		cn = nil
-		return
-	}
-
-	err = cn.ssl(o)
-	if nil != err {
-		if nil != cn.c {
-			cn.c.Close()
-		}
-		cn = nil
-		return
-	}
-
-	// cn.startup报错时确保不会泄露cn.c
+	//支持多主机地址
+	var lastErr error
 	var panicking bool = true
-	defer func() {
-		if panicking {
-			cn.c.Close()
+	if numHosts != numPorts {
+		if numPorts != 1 {
+			err = fmt.Errorf("the number of host and port dose not match, host: %d, port: %d", numHosts, numPorts)
+			cn = nil
+			return
 		}
-	}()
+	} else {
+		numMatch = true
+	}
+	for {
+		for j = 0; j < numHosts; j++ {
+			o["host"] = c.hosts[j]
+			if numMatch {
+				o["port"] = c.ports[j]
+			} else {
+				o["port"] = c.ports[0]
+			}
+			cn.c, err = dial(ctx, c.dialer, o)
+			if nil != err {
+				lastErr = err
+				continue
+			}
 
-	cn.buf = bufio.NewReader(cn.c)
-	cn.startup(o)
+			err = cn.ssl(o)
+			if nil != err {
+				if nil != cn.c {
+					cn.c.Close()
+				}
+				lastErr = err
+				continue
+			}
+			// cn.startup报错时确保不会泄露cn.c
+			defer func() {
+				if panicking {
+					if nil != cn.c {
+						cn.c.Close()
+					}
+				}
+			}()
+
+			cn.buf = bufio.NewReader(cn.c)
+			cn.startup(o)
+
+			//判断是否需要找主
+			if cn.requirePrimary {
+				isPrimary, err := getPrimary(cn)
+				if err != nil {
+					if nil != cn.c {
+						cn.c.Close()
+					}
+					lastErr = fmt.Errorf("getPrimary failed: %v", err)
+					continue
+				}
+				if !isPrimary {
+					//非主节点
+					if nil != cn.c {
+						cn.c.Close()
+					}
+					lastErr = fmt.Errorf("not a primary node")
+					continue
+				}
+			}
+			//已找到符合要求的节点，退出循环
+			err = nil
+			lastErr = nil
+			break
+		}
+		if nil != err {
+			i++
+			if i > cn.retry {
+				break
+			} else {
+				time.Sleep(time.Duration(cn.delay) * time.Second)
+				continue
+			}
+		}
+		break
+	}
+	if nil != err || nil != lastErr {
+		err = fmt.Errorf("all connection attempts failed: %v", lastErr)
+		return
+	}
+	cn.opts["host"] = o["host"]
+	cn.opts["port"] = o["port"]
 
 	// 重置deadline
 	if timeout, ok := o["connect_timeout"]; "0" != timeout && ok {
 		err = cn.c.SetDeadline(time.Time{})
 	}
-	panicking = false
 
 	// 获取数据库模式
-	getDatabaseMode(cn)
+	err = getDatabaseMode(cn)
+	//忽略了因为数据库模式查询导致的出错，避免连接pg生态没有数据库模式导致无法连接
+	if err != nil {
+		return
+	}
+	panicking = false
 
 	return
 }
 
-func getDatabaseMode(cn *conn) {
+func getPrimary(cn *conn) (isPrimary bool, err error) {
 	var dest interface{}
-	rs, err := cn.simpleQuery("show database_mode;")
+	var transaction_read_only string
+	defer cn.errRecover(&err)
+
+	rs, err := cn.simpleQuery("show transaction_read_only;")
 	if nil != err {
 		if nil != cn.c {
 			cn.c.Close()
 		}
-		cn = nil
-		return
+		return false, err
 	}
 	for {
 		t := cn.recv1Buf(&rs.rb)
@@ -598,15 +702,75 @@ func getDatabaseMode(cn *conn) {
 		case 'D':
 			n := rs.rb.int16()
 			if nil != err {
-				cn.bad = true
+				errorf("unexpected DataRow after error %s", err)
+			} else if n != 1 {
+				errorf("unexpected Rows of transaction_read_only")
+			}
+			l := rs.rb.int32()
+			if -1 == l || 0 == l {
+				errorf("unexpected result length of transaction_read_only")
+			}
+			dest = decode(&cn.parameterStatus, rs.rb.next(l), rs.colTyps[0].OID, rs.colFmts[0], *cn)
+			switch dest := dest.(type) {
+			case []uint8:
+				transaction_read_only = strings.ToLower(string(dest))
+			case string:
+				transaction_read_only = strings.ToLower(dest)
+			default:
+				errorf("unexpected type for transaction_read_only:%v", reflect.TypeOf(dest))
+			}
+			continue
+		default:
+			errorf("unexpected message after execute: %q", t)
+		}
+	}
+	if transaction_read_only == "off" {
+		isPrimary = true
+	} else if transaction_read_only == "on" {
+		isPrimary = false
+	} else {
+		errorf("unexpected value for transaction_read_only: %v", transaction_read_only)
+	}
+	return isPrimary, nil
+}
+
+func getDatabaseMode(cn *conn) (err error) {
+	var dest interface{}
+	defer cn.errRecover(&err)
+
+	rs, err := cn.simpleQuery("show database_mode;")
+	if nil != err {
+		//忽略查询数据库模式的出错，该错误可能是因为连接pg生态没有数据库模式
+		setDatabaseModeOid(cn)
+		return nil
+	}
+	for {
+		t := cn.recv1Buf(&rs.rb)
+		if t == 'Z' {
+			break
+		}
+		switch t {
+		case 'E':
+			//上述已忽略错误，此处不会执行
+			err = parseError(&rs.rb)
+		case 'C', 'I', 'Z':
+			if 'C' == t {
+				rs.result, rs.tag = cn.parseComplete(rs.rb.string(), 0)
+			}
+			break
+		case 'T':
+			rs.rowsHeader = parsePortalRowDescribe(&rs.rb)
+			continue
+		case 'D':
+			n := rs.rb.int16()
+			if nil != err {
 				errorf("unexpected DataRow after error %s", err)
 			} else if n != 1 {
 				errorf("unexpected Rows of database_mode")
 			}
 			l := rs.rb.int32()
-			if -1 == l {
-				dest = ""
-				continue
+			if -1 == l || 0 == l {
+				errorf("unexpected result length of database_mode")
 			}
 			dest = decode(&cn.parameterStatus, rs.rb.next(l), rs.colTyps[0].OID, rs.colFmts[0], *cn)
 			switch dest := dest.(type) {
@@ -617,13 +781,14 @@ func getDatabaseMode(cn *conn) {
 			default:
 				errorf("unexpected type for database_mode:%v", reflect.TypeOf(dest))
 			}
-
 			continue
 		default:
 			errorf("unexpected message after execute: %q", t)
 		}
 	}
+	cn.databaseMode = strings.ToLower(cn.databaseMode)
 	setDatabaseModeOid(cn)
+	return nil
 }
 
 func setDatabaseModeOid(cn *conn) {
@@ -685,7 +850,7 @@ func setDatabaseModeOid(cn *conn) {
 		// oid.TypeName[oid.T_longblob], oid.TypeName[oid.T__longblob] = "LONGBLOB", "_LONGBLOB"
 		// oid.TypeName[oid.T_mediumblob], oid.TypeName[oid.T__mediumblob] = "MEDIUMBLOB", "_MEDIUMBLOB"
 		// oid.TypeName[oid.T_tinyblob], oid.TypeName[oid.T__tinyblob] = "TINYBLOB", "_TINYBLOB"
-	} else if cn.databaseMode == "oracle" || cn.databaseMode == "" {
+	} else if cn.databaseMode == "oracle" || cn.databaseMode == "pg" || cn.databaseMode == "" {
 		cn.allOid = oracleOid.OracleOid
 		cn.TypeName = oracleOid.TypeName
 		// oid.T_date, oid.T__date = oracleOid.T_date, oracleOid.T__date
@@ -785,7 +950,7 @@ func (s *scanner) SkipSpaces() (rString rune, state bool) {
 }
 
 // parseOpts解析name中的选项并将其添加到values中
-func parseOpts(name string, o values) (err error) {
+func parseOpts(name string, o values) (hosts []string, ports []string, err error) {
 	s := newScanner(name)
 
 	for {
@@ -795,6 +960,7 @@ func parseOpts(name string, o values) (err error) {
 			ok                 bool
 		)
 
+		//跳过连接串的前导空格
 		if r, ok = s.SkipSpaces(); !ok {
 			break
 		}
@@ -813,8 +979,8 @@ func parseOpts(name string, o values) (err error) {
 		}
 
 		// 当前字符应该为=
-		if '=' != r || !ok {
-			err = fmt.Errorf(`missing "=" after %q in connection info string"`, string(keyRunes))
+		if ('=' != r && ',' != r) || !ok {
+			err = fmt.Errorf(`missing "=" after %q in connection info string`, string(keyRunes))
 			return
 		}
 
@@ -858,6 +1024,15 @@ func parseOpts(name string, o values) (err error) {
 			}
 		}
 		o[string(keyRunes)] = string(valRunes)
+	}
+	//解析多主机地址和端口
+	hosts = strings.Split(o["host"], ",")
+	for i, h := range hosts {
+		hosts[i] = strings.TrimSpace(h)
+	}
+	ports = strings.Split(o["port"], ",")
+	for i, p := range ports {
+		ports[i] = strings.TrimSpace(p)
 	}
 	err = nil
 	return
@@ -997,22 +1172,72 @@ func (cn *conn) addReturning(q string) string {
 	//转为小写以忽略大小写
 	lowerSql := strings.ToLower(trimmedSql)
 	if strings.HasPrefix(lowerSql, "insert") {
-		cn.getLastInserttId.isInsert = true
+		//数据库不支持insert ignore+returning的用法
+		cn.getLastInsertId.isInsert = true
 		if strings.HasSuffix(lowerSql, ";") {
-			return strings.TrimSuffix(trimmedSql, ";") + " RETURNING *;"
+			trimmedSql = strings.TrimSuffix(trimmedSql, ";")
 		}
 		return trimmedSql + " RETURNING *"
 	}
 	//非insert语句，返回原sql
-	cn.getLastInserttId.isInsert = false
+	cn.getLastInsertId.isInsert = false
 	return q
+}
+
+func getID(cn *conn) (id int64) {
+	var dest interface{}
+	rs, err := cn.simpleQuery("select last_insert_id();")
+	if nil != err {
+		errorf("unexpected err for last_insert_id():%s", err)
+	}
+	for {
+		t := cn.recv1Buf(&rs.rb)
+		if t == 'Z' {
+			break
+		}
+		switch t {
+		case 'E':
+			err = parseError(&rs.rb)
+		case 'C', 'I', 'Z':
+			if 'C' == t {
+				rs.result, rs.tag = cn.parseComplete(rs.rb.string(), 0)
+			}
+			break
+		case 'T':
+			rs.rowsHeader = parsePortalRowDescribe(&rs.rb)
+			continue
+		case 'D':
+			n := rs.rb.int16()
+			if nil != err {
+				cn.bad = true
+				errorf("unexpected DataRow after error %s", err)
+			} else if n != 1 {
+				errorf("unexpected returning num of columns:%d", n)
+			}
+			l := rs.rb.int32()
+			if -1 == l {
+				dest = 0
+				continue
+			}
+			dest = decode(&cn.parameterStatus, rs.rb.next(l), rs.colTyps[0].OID, rs.colFmts[0], *cn)
+			//数据库返回的last_insert_id将会被解析为uint64
+			id = int64(dest.(uint64))
+			continue
+		default:
+			errorf("unexpected message after execute: %q", t)
+		}
+	}
+	return id
 }
 
 func (cn *conn) simpleExec(q string) (res driver.Result, commandTag string, err error) {
 	//判断是否需要拼接RETURNING *以获取自增列id
 	var row *rows
 	var dest interface{}
-	if cn.getLastInserttId.enable {
+	var lastID int64 = 0
+	var alreadyGet bool = false
+	//var tag string
+	if cn.getLastInsertId.enable {
 		q = cn.addReturning(q)
 	}
 
@@ -1024,25 +1249,20 @@ func (cn *conn) simpleExec(q string) (res driver.Result, commandTag string, err 
 		t, r := cn.recv1()
 		switch t {
 		case 'C':
-			if dest != nil {
-				//dest已被赋值，则仅可能为自增列id
-				res, commandTag = cn.parseComplete(r.string(), dest.(int64))
-			} else {
-				res, commandTag = cn.parseComplete(r.string(), 0)
-			}
+			res, commandTag = cn.parseComplete(r.string(), lastID)
 		case 'Z':
 			cn.processReadyForQuery(r)
 			if nil == res && nil == err {
 				err = errUnexpectedReady
 			}
 			return
-		case 'T':
-			if cn.getLastInserttId.enable && cn.getLastInserttId.isInsert {
+		case 'T': //可能的自增列id的T
+			if cn.getLastInsertId.enable && cn.getLastInsertId.isInsert {
 				row = &rows{cn: cn}
 				row.rowsHeader = parsePortalRowDescribe(r)
 			}
-		case 'D':
-			if cn.getLastInserttId.enable && cn.getLastInserttId.isInsert {
+		case 'D': //可能的自增列id的D
+			if cn.getLastInsertId.enable && cn.getLastInsertId.isInsert {
 				if nil == row {
 					cn.bad = true
 					errorf("unexpected DataRow in simple query execution")
@@ -1066,6 +1286,10 @@ func (cn *conn) simpleExec(q string) (res driver.Result, commandTag string, err 
 						continue
 					}
 					dest = decode(&cn.parameterStatus, r.next(l), row.colTyps[0].OID, row.colFmts[0], *cn)
+					if !alreadyGet {
+						lastID = dest.(int64)
+						alreadyGet = true
+					}
 				default:
 					//errorf("the first column(oid:%d) is not auto_increment id", row.colTyps[0].OID)
 				}
@@ -1406,7 +1630,7 @@ func (cn *conn) sendPmessage(q, stmtName string, v []driver.Value) (hasRet bool)
 		}
 	}
 
-	if cn.getLastInserttId.enable {
+	if cn.getLastInsertId.enable {
 		q = cn.addReturning(q)
 	}
 
@@ -1756,6 +1980,12 @@ func isDriverSetting(key string) (state bool) {
 	case "disable_prepared_binary_result":
 		fallthrough
 	case "binary_parameters":
+		fallthrough
+	case "target_session_attrs":
+		fallthrough
+	case "retry":
+		fallthrough
+	case "delay":
 		state = true
 	default:
 		state = false
@@ -1933,6 +2163,10 @@ func (st *stmt) Close() (err error) {
 }
 
 func (st *stmt) Query(v []driver.Value) (r driver.Rows, err error) {
+	return st.query(v)
+}
+
+func (st *stmt) query(v []driver.Value) (r *rows, err error) {
 	if st.cn.bad {
 		r = nil
 		err = driver.ErrBadConn
@@ -2019,7 +2253,14 @@ func (st *stmt) exec(v []driver.Value) (err error) {
 	} else {
 		w.int16(len(v))
 		for i := 0; i < len(v); i++ {
-			w.int16(0)
+			if st.paramTyps[i] == cn.allOid.T_blob ||
+				st.paramTyps[i] == cn.allOid.T_tinyblob ||
+				st.paramTyps[i] == cn.allOid.T_mediumblob ||
+				st.paramTyps[i] == cn.allOid.T_longblob {
+				w.int16(1)
+			} else {
+				w.int16(0)
+			}
 		}
 		w.int16(len(v))
 		for i, x := range v {
@@ -2482,7 +2723,6 @@ func (rs *rows) Next(dest []driver.Value) (err error) {
 		switch t {
 		case 'E':
 			err = parseError(&rs.rb)
-			panic(err)
 		case 'C', 'I':
 			if 'C' == t {
 				rs.result, rs.tag = conn.parseComplete(rs.rb.string(), 0)
@@ -2504,7 +2744,6 @@ func (rs *rows) Next(dest []driver.Value) (err error) {
 				err = rs.cn.ParseOutValues(&rs.rb, rs.bindParams, rs.TMessage.colTyps)
 				if err != nil {
 					panic(err)
-					return
 				}
 				rs.next = nil
 				err = io.EOF
@@ -2521,8 +2760,12 @@ func (rs *rows) Next(dest []driver.Value) (err error) {
 				}
 				for i := range dest {
 					l := rs.rb.int32()
-					if 0 == l {
-						//判断该字段类型并赋空值而不是nil
+					if -1 == l {
+						// 空对象
+						dest[i] = nil
+						continue
+					} else if 0 == l {
+						// 空字符串
 						typs := rs.colTyps[i].OID
 						switch typs {
 						case conn.allOid.T_varchar, conn.allOid.T_char, conn.allOid.T_bpchar, conn.allOid.T_text, conn.allOid.T_varcharbyte, conn.allOid.T_nvarchar, conn.allOid.T_bpcharbyte, conn.allOid.T_nchar:
@@ -2530,9 +2773,6 @@ func (rs *rows) Next(dest []driver.Value) (err error) {
 						default:
 							dest[i] = nil
 						}
-						continue
-					} else if l == -1 {
-						dest[i] = nil
 						continue
 					}
 					dest[i] = decode(&conn.parameterStatus, rs.rb.next(l), rs.colTyps[i].OID, rs.colFmts[i], *rs.cn)
@@ -2730,12 +2970,7 @@ func (cn *conn) processBackendKeyData(rb *readBuf) {
 }
 
 func (cn *conn) readParseResponse() (err error) {
-	defer func() {
-		_ = recover()
-		if r := recover(); r != nil {
-			fmt.Println("readParseResponse error:", r)
-		}
-	}()
+	defer cn.errRecover(&err)
 
 	t, r := cn.recv1()
 	switch t {
@@ -2753,11 +2988,7 @@ func (cn *conn) readParseResponse() (err error) {
 }
 
 func (cn *conn) readStatementDescribeResponse() (paramTyps []oid.Oid, colNames []string, colTyps []fieldDesc, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Println("readStatementDescribeResponse error:", r)
-		}
-	}()
+	defer cn.errRecover(&err)
 
 	for {
 		t, r := cn.recv1()
@@ -2783,7 +3014,6 @@ func (cn *conn) readStatementDescribeResponse() (paramTyps []oid.Oid, colNames [
 			errorf("unexpected Describe statement response %q", t)
 		}
 	}
-	return
 }
 
 func (cn *conn) readPortalDescribeResponse() (header rowsHeader) {
@@ -2889,7 +3119,6 @@ func (cn *conn) postExecuteWorkaround(st *stmt) (colNames []string, colTyps []fi
 			return
 		}
 	}
-	return
 }
 
 func fill64(v []byte) []byte {
@@ -2904,6 +3133,9 @@ func fill64(v []byte) []byte {
 
 func (cn *conn) readExecuteResponse(protocolState string, v []driver.Value, colTyps []fieldDesc, colFmts []format) (res driver.Result, commandTag string, err error) {
 	var dest interface{}
+	var lastID int64 = 0
+	var alreadyGet bool = false
+	//var tag string
 	for {
 		t, r := cn.recv1()
 		switch t {
@@ -2928,8 +3160,8 @@ func (cn *conn) readExecuteResponse(protocolState string, v []driver.Value, colT
 				cn.bad = true
 				errorf("unexpected %q after error %s", t, err)
 			}
-			//在开启getLastInserttId后且对于insert语句尝试获取第一列自增列id
-			if cn.getLastInserttId.enable && cn.getLastInserttId.isInsert {
+			//在开启getLastInsertId后且对于insert语句尝试获取第一列自增列id
+			if cn.getLastInsertId.enable && cn.getLastInsertId.isInsert {
 				if n := r.int16(); n < 1 {
 					cn.bad = true
 					errorf("unexpected returning num of columns:%d", n)
@@ -2948,6 +3180,10 @@ func (cn *conn) readExecuteResponse(protocolState string, v []driver.Value, colT
 						continue
 					}
 					dest = decode(&cn.parameterStatus, r.next(l), colTyps[0].OID, colFmts[0], *cn)
+					if !alreadyGet {
+						lastID = dest.(int64)
+						alreadyGet = true
+					}
 				default:
 					//errorf("the first column(oid:%d) is not auto_increment id", colTyps[0].OID)
 				}
@@ -2966,12 +3202,7 @@ func (cn *conn) readExecuteResponse(protocolState string, v []driver.Value, colT
 				cn.bad = true
 				errorf("unexpected CommandComplete after error %s", err)
 			}
-			if dest != nil {
-				//dest已被赋值，则仅可能为自增列id
-				res, commandTag = cn.parseComplete(r.string(), dest.(int64))
-			} else {
-				res, commandTag = cn.parseComplete(r.string(), 0)
-			}
+			res, commandTag = cn.parseComplete(r.string(), lastID)
 		case 'n':
 			continue
 		default:

@@ -2,29 +2,38 @@ package kingbase
 
 import (
 	"fmt"
-	"strings"
+	"time"
 
-	"github.com/go-sql-driver/mysql"
+	"github.com/kweaver-ai/proton-rds-sdk-go/driver/common"
 )
 
-func FormatDSN(cfg mysql.Config) string {
+func FormatDSN(cfg common.DSNConfig) (string, error) {
 	dsn := ""
-	if cfg.User != "" {
-		dsn += fmt.Sprintf("user=%s ", cfg.User)
+	if cfg.Username != "" {
+		dsn += fmt.Sprintf("user=%s ", cfg.Username)
 	}
-	if cfg.Passwd != "" {
-		dsn += fmt.Sprintf("password=%s ", cfg.Passwd)
+	if cfg.Password != "" {
+		dsn += fmt.Sprintf("password=%s ", cfg.Password)
 	}
-	if cfg.Addr != "" {
-		s := strings.Split(cfg.Addr, ":")
-		port := s[len(s)-1]
-		host := cfg.Addr[:len(cfg.Addr)-len(port)-1]
-		dsn += fmt.Sprintf("host=%s port=%s ", host, port)
+	if cfg.Host != "" {
+		dsn += fmt.Sprintf("host=%s ", cfg.Host)
+	}
+	if cfg.Port != "" {
+		dsn += fmt.Sprintf("port=%s ", cfg.Port)
 	}
 	if cfg.DBName != "" {
 		dsn += fmt.Sprintf("search_path=%s ", cfg.DBName)
 	}
-	dsn += fmt.Sprintf("connect_timeout=%d ", cfg.Timeout/(1000*1000*1000))
+
+	if timeoutStr, exist := cfg.Props.Get("timeout"); exist {
+		timeout, err := time.ParseDuration(timeoutStr.(string))
+		if err != nil {
+			return "", err
+		}
+
+		dsn += fmt.Sprintf("connect_timeout=%d ", timeout/(1000*1000*1000))
+	}
+
 	dsn += "sslmode=disable dbname=proton"
-	return dsn
+	return dsn, nil
 }

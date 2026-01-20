@@ -15,9 +15,8 @@ import (
 )
 
 /*****************conn.go*****************/
-const GOKB_Version_V008R006B0001 = iota
-const GOKB_CompileTime_20230526_103734 = iota
-const GOKB_CommitID_169f4a45 = iota
+const GOKB_Version_V009R030C011B0003PSI002 = iota
+const GOKB_CompileTime_20250731 = iota
 const GOKB_CompilerVersion_go1_19_1_linux_amd64 = iota
 
 // 常见错误
@@ -110,7 +109,13 @@ type conn struct {
 	TypeName map[oid.Oid]string
 
 	// 设置后，对于insert语句将在末尾拼接returning *以获取自增列id
-	getLastInserttId autoIncrementId
+	getLastInsertId autoIncrementId
+
+	// 多主机地址的连接重试次数和每次尝试的延迟
+	retry int
+	delay int
+	// 配置多主机地址时是否要求必须连接主节点
+	requirePrimary bool
 }
 
 type autoIncrementId struct {
@@ -317,6 +322,10 @@ type Listener struct {
 type Connector struct {
 	opts   values
 	dialer Dialer
+
+	// 多主机地址和端口
+	hosts []string
+	ports []string
 }
 
 /*****************encode.go*****************/
