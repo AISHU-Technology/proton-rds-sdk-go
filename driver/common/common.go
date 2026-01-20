@@ -30,7 +30,7 @@ func ParseMySQLDSN(dsn string) (mysql.Config, error) {
 	return *cfg, err
 }
 
-// ParseDSN 解析DSN字符串，返回DSN参数映射，参数全转为小写
+// ParseDSN 解析DSN字符串，返回DSN参数映射，参数保持原大小写
 // DSN格式：user:password@protocol(host:port)/dbname?param=value&param=value
 func ParseDSN(dsn string) (DSNConfig, error) {
 
