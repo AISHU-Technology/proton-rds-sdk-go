@@ -3,32 +3,46 @@ package kingbase
 import (
 	"context"
 	"database/sql/driver"
+	"fmt"
+	"os"
 )
 
 type KBConn struct {
-	conn driver.Conn
+	driver.Conn
 }
 
-func (KC KBConn) ExecContext(ctx context.Context, sql string, args []driver.NamedValue) (driver.Result, error) {
-	return KC.conn.(driver.ExecerContext).ExecContext(ctx, sql, args)
+func (kbConn KBConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if os.Getenv("RDS_SDK_DEBUG") == "true" {
+		fmt.Println("conn exec: ", query, args)
+	}
+	return kbConn.Conn.(driver.ExecerContext).ExecContext(ctx, query, args)
 }
 
-func (KC KBConn) QueryContext(ctx context.Context, sql string, args []driver.NamedValue) (driver.Rows, error) {
-	return KC.conn.(driver.QueryerContext).QueryContext(ctx, sql, args)
+func (kbConn KBConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if os.Getenv("RDS_SDK_DEBUG") == "true" {
+		fmt.Println("conn query: ", query, args)
+	}
+	return kbConn.Conn.(driver.QueryerContext).QueryContext(ctx, query, args)
 }
 
-func (KC KBConn) PrepareContext(ctx context.Context, sql string) (driver.Stmt, error) {
-	return KC.conn.Prepare(sql)
+func (kbConn KBConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	if os.Getenv("RDS_SDK_DEBUG") == "true" {
+		fmt.Println("conn prepare: ", query)
+	}
+	return kbConn.Conn.Prepare(query)
 }
 
-func (KC KBConn) Prepare(sql string) (driver.Stmt, error) {
-	return KC.conn.Prepare(sql)
+func (kbConn KBConn) Prepare(query string) (driver.Stmt, error) {
+	if os.Getenv("RDS_SDK_DEBUG") == "true" {
+		fmt.Println("conn prepare: ", query)
+	}
+	return kbConn.Conn.Prepare(query)
 }
 
-func (KC KBConn) Begin() (driver.Tx, error) {
-	return KC.conn.Begin()
+func (kbConn KBConn) Begin() (driver.Tx, error) {
+	return kbConn.Conn.Begin()
 }
 
-func (KC KBConn) Close() error {
-	return KC.conn.Close()
+func (kbConn KBConn) Close() error {
+	return kbConn.Conn.Close()
 }

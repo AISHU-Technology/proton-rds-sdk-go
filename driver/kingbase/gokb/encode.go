@@ -205,6 +205,12 @@ func binaryDecode(parameterStatus *parameterStatus, s []byte, typ oid.Oid, cn co
 	case cn.allOid.T_int2, cn.allOid.T_smallint:
 		value = int64(int16(binary.BigEndian.Uint16(s)))
 		return
+	case cn.allOid.T_uint8:
+		s, _ := strconv.ParseUint(string(s), 10, 64)
+		value = uint64(s)
+	case cn.allOid.T_uint4:
+		s, _ := strconv.ParseUint(string(s), 10, 64)
+		value = uint32(s)
 	case cn.allOid.T_tinyint:
 		fillByte := fill64(s)
 		if cn.databaseMode == "sqlserver" {
@@ -296,6 +302,14 @@ func textDecode(parameterStatus *parameterStatus, s []byte, typ oid.Oid, cn conn
 		}
 		value = i
 		return i
+	case cn.allOid.T_uint8:
+		s, _ := strconv.ParseUint(string(s), 10, 64)
+		value = uint64(s)
+		return
+	case cn.allOid.T_uint4:
+		s, _ := strconv.ParseUint(string(s), 10, 64)
+		value = uint32(s)
+		return
 	case cn.allOid.T_tinyint:
 		sVal, _ := strconv.ParseInt(string(s), 10, 64)
 		if cn.databaseMode == "sqlserver" {

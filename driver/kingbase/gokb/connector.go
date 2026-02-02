@@ -41,6 +41,8 @@ func (c *Connector) Driver() driver.Driver { return &Driver{} }
 // 返回的Connector也将用于database/sql的OpenDB函数
 func NewConnector(dsn string) (conn *Connector, err error) {
 	o := make(values)
+	var hosts []string
+	var ports []string
 	var timeout timeoutParams
 
 	// 按以下顺序使用连接参数:
@@ -56,14 +58,14 @@ func NewConnector(dsn string) (conn *Connector, err error) {
 		o[k] = v
 	}
 
-	if strings.HasPrefix(dsn, "kingbase://") || strings.HasPrefix(dsn, "kingbase://") {
+	if strings.HasPrefix(dsn, "kingbase://") {
 		dsn, err = ParseURL(dsn)
 		if nil != err {
 			return nil, err
 		}
 	}
 
-	if err := parseOpts(dsn, o); err != nil {
+	if hosts, ports, err = parseOpts(dsn, o); err != nil {
 		return nil, err
 	}
 
@@ -98,27 +100,41 @@ func NewConnector(dsn string) (conn *Connector, err error) {
 	}
 
 	if v, ok := o["connect_timeout"]; ok {
-		timeout.connect_timeout, _ = strconv.Atoi(v)
+		timeout.connect_timeout, err = strconv.Atoi(v)
+		if nil != err {
+			return nil, err
+		}
 	} else {
 		timeout.connect_timeout = 0
 	}
 	if v, ok := o["keepalive_interval"]; ok {
-		timeout.keepalive_interval, _ = strconv.Atoi(v)
+		timeout.keepalive_interval, err = strconv.Atoi(v)
+		if nil != err {
+			return nil, err
+		}
 	} else {
-		timeout.keepalive_interval = 0
+		timeout.keepalive_interval = 0 //配置为0则go使用自身的默认表现15s
 	}
 	if v, ok := o["keepalive_count"]; ok {
-		timeout.keepalive_count, _ = strconv.Atoi(v)
+		timeout.keepalive_count, err = strconv.Atoi(v)
+		if nil != err {
+			return nil, err
+		}
 	} else {
-		timeout.keepalive_count = 1 //次数使用0并不会使用go的默认值1，所以此处显式赋1
+		timeout.keepalive_count = 10 //次数使用0并不会使用go的默认值10而是会报错无法连接，所以此处显式赋10
 	}
 	if v, ok := o["tcp_user_timeout"]; ok {
-		timeout.tcp_user_timeout, _ = strconv.Atoi(v)
+		timeout.tcp_user_timeout, err = strconv.Atoi(v)
+		if nil != err {
+			return nil, err
+		}
 	} else {
 		timeout.tcp_user_timeout = 0
 	}
 	return &Connector{
 		opts:   o,
 		dialer: defaultDialer{d: CreateDialer(timeout)},
+		hosts:  hosts,
+		ports:  ports,
 	}, nil
 }
