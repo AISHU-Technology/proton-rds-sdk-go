@@ -66,12 +66,13 @@ func TestFormatDSN(t *testing.T) {
 			So(got, ShouldEqual, "dm://username:password@myserver.example.com:5237?schema=test&compatibleMode=mysql&escapeProcess=true&svcConfPath=/tmp/dm_svc.conf")
 		})
 		Convey("special characters in password", func() {
-			dsn := "username:&#%*#.com123@tcp(localhost:5237)/test"
+			dsn := "username:&#%*@#.com123@tcp(localhost:5237)/test"
 			cfg, err := common.ParseDSN(dsn)
 			So(err, ShouldBeNil)
+			So(cfg.Password, ShouldEqual, "&#%*@#.com123")
 			got, err := FormatDSN(cfg)
 			So(err, ShouldBeNil)
-			So(got, ShouldEqual, "dm://username:&#%*#.com123@localhost:5237?schema=test&compatibleMode=mysql&escapeProcess=true&svcConfPath=/tmp/dm_svc.conf")
+			So(got, ShouldEqual, "dm://username:&#%*@#.com123@localhost:5237?schema=test&compatibleMode=mysql&escapeProcess=true&svcConfPath=/tmp/dm_svc.conf")
 		})
 	})
 }

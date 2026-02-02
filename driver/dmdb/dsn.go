@@ -11,10 +11,12 @@ import (
 	"github.com/kweaver-ai/proton-rds-sdk-go/driver/common"
 )
 
-var REPLACE_PARAMS = map[string]string{
-	"timeout":    "connectTimeout",
-	"autocommit": "autoCommit",
-}
+var (
+	REPLACE_PARAMS = map[string]string{
+		"timeout":    "connectTimeout",
+		"autocommit": "autoCommit",
+	}
+)
 
 var (
 	errNoDMSVCConf = errors.New("invalid DMSVCConf: no dm_svc_conf,may permission problem?please check env")
